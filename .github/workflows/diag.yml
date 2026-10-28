@@ -1,7 +1,7 @@
 name: Rust diag variant
 on:
   push:
-    branches: ['lab/**']
+    paths: ['.github/workflows/**']
 jobs:
   diag:
     runs-on: ubuntu-latest
