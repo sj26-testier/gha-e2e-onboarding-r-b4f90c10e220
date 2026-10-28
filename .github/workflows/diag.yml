@@ -1,17 +1,15 @@
 name: Rust diag variant
 on: push
-env:
-  LAB_VAR: hello
-permissions:
-  contents: read
-concurrency:
-  group: diag-${{ github.ref }}
-  cancel-in-progress: false
-defaults:
-  run:
-    shell: bash
 jobs:
-  diag:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        n: [a, b]
+    steps:
+      - run: echo build-${{ matrix.n }}
+  after:
+    needs: build
     runs-on: ubuntu-latest
     steps:
-      - run: echo "variant-ok $LAB_VAR $0"
+      - run: echo after-ok
