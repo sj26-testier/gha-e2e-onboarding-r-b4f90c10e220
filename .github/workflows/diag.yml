@@ -1,6 +1,9 @@
 name: Rust diag variant
-on: push
+on:
+  push:
+    branches: ['lab/**']
 jobs:
   diag:
+    runs-on: ubuntu-latest
     steps:
       - run: echo variant-ok
