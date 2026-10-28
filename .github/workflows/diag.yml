@@ -1,9 +1,17 @@
 name: Rust diag variant
-on:
-  push:
-    paths: ['.github/workflows/**']
+on: push
+env:
+  LAB_VAR: hello
+permissions:
+  contents: read
+concurrency:
+  group: diag-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
 jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
-      - run: echo variant-ok
+      - run: echo "variant-ok $LAB_VAR $0"
