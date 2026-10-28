@@ -1,0 +1,23 @@
+name: Rust diag variant
+on: push
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: diag
+        shell: bash
+        run: |
+          set +e
+          id; echo "HOME=$HOME"; echo "--- PATH"; echo "$PATH" | tr ':' '\n'
+          echo "--- /etc/environment (cat -A)"; cat -A /etc/environment
+          echo "--- command -v"; command -v cargo rustc rustup || echo "cargo: MISSING"
+          echo "--- full path"; ~/.cargo/bin/cargo --version 2>&1; ~/.cargo/bin/rustc --version 2>&1
+          for d in /home/runner/.cargo/bin /usr/local/.ghcup/bin /opt/pipx_bin /home/runner/.dotnet/tools "$HOME/.cargo/bin" /etc/skel/.cargo/bin; do
+            case ":$PATH:" in *":$d:"*) p=yes;; *) p=NO;; esac
+            if [ -d "$d" ]; then echo "CAND $d exists in_PATH=$p: $(ls "$d" | head -20 | tr '\n' ' ')"; else echo "CAND $d ABSENT in_PATH=$p"; fi
+          done
+          echo "CARGO_HOME=${CARGO_HOME-unset} RUSTUP_HOME=${RUSTUP_HOME-unset} ImageOS=${ImageOS-unset} ImageVersion=${ImageVersion-unset}"
+          cat /imagegeneration/imagedata.json 2>&1 | head -12
+          cd "$(mktemp -d)" && printf '[package]\nname="diag"\nversion="0.1.0"\nedition="2021"\n' > Cargo.toml && mkdir src && echo 'fn main(){println!("hello-diag");}' > src/main.rs
+          echo "--- plain cargo build"; cargo build 2>&1 | tail -2
+          echo "--- prepended cargo build"; PATH="$HOME/.cargo/bin:$PATH" cargo build 2>&1 | tail -2 && ./target/debug/diag
