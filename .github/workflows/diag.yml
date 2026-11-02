@@ -8,13 +8,10 @@ jobs:
         shell: bash
         run: |
           set +e
-          id; echo "HOME=$HOME"; echo "--- PATH"; echo "$PATH" | tr ':' '\n'
-          echo "--- /etc/environment"; cat -A /etc/environment | head -3
-          echo "--- command -v"; command -v cargo rustc rustup buildkite-agent docker || echo "some MISSING"
-          echo "CARGO_HOME=${CARGO_HOME-unset} RUSTUP_HOME=${RUSTUP_HOME-unset}"
-          for d in /home/runner/.cargo/bin /buildkite/agent/bin /nsc/bin; do case ":$PATH:" in *":$d:"*) echo "INPATH $d yes";; *) echo "INPATH $d NO";; esac; done
-          echo "--- buildkite-agent"; buildkite-agent --version 2>&1
-          echo "--- docker"; docker version --format 'client={{.Client.Version}} server={{.Server.Version}}' 2>&1
+          id; echo "--- PATH"; echo "$PATH" | tr ':' '\n'
+          echo "--- command -v"; for t in buildkite-agent docker cargo; do echo "$t: $(command -v $t || echo MISSING)"; done
+          echo "--- /vendor/docker"; ls -la /vendor/docker 2>&1
+          buildkite-agent --version; docker version --format 'client={{.Client.Version}} server={{.Server.Version}}' 2>&1
           docker run --rm hello-world 2>&1 | grep -m1 'Hello from Docker' || echo "docker run FAILED"
       - name: plain cargo build
         shell: bash
