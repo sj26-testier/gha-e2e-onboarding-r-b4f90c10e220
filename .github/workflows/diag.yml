@@ -1,15 +1,23 @@
 name: Rust diag variant
 on: push
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        n: [a, b]
-    steps:
-      - run: echo build-${{ matrix.n }}
-  after:
-    needs: build
+  diag:
     runs-on: ubuntu-latest
     steps:
-      - run: echo after-ok
+      - name: diag
+        shell: bash
+        run: |
+          set +e
+          id; echo "HOME=$HOME"; echo "--- PATH"; echo "$PATH" | tr ':' '\n'
+          echo "--- /etc/environment"; cat -A /etc/environment | head -3
+          echo "--- command -v"; command -v cargo rustc rustup buildkite-agent docker || echo "some MISSING"
+          echo "CARGO_HOME=${CARGO_HOME-unset} RUSTUP_HOME=${RUSTUP_HOME-unset}"
+          for d in /home/runner/.cargo/bin /buildkite/agent/bin /nsc/bin; do case ":$PATH:" in *":$d:"*) echo "INPATH $d yes";; *) echo "INPATH $d NO";; esac; done
+          echo "--- buildkite-agent"; buildkite-agent --version 2>&1
+          echo "--- docker"; docker version --format 'client={{.Client.Version}} server={{.Server.Version}}' 2>&1
+          docker run --rm hello-world 2>&1 | grep -m1 'Hello from Docker' || echo "docker run FAILED"
+      - name: plain cargo build
+        shell: bash
+        run: |
+          cd "$(mktemp -d)" && printf '[package]\nname="diag"\nversion="0.1.0"\nedition="2021"\n' > Cargo.toml && mkdir src && echo 'fn main(){println!("hello-diag");}' > src/main.rs
+          cargo --version && cargo build && ./target/debug/diag
