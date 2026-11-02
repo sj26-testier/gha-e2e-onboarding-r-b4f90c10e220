@@ -1,0 +1,305 @@
+name: Paired Git identity probe
+on:
+  push:
+    branches: ['lab/r-400ff38276f5']
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Identity before checkout
+        shell: bash
+        run: |
+          cat > /tmp/paired-git-identity-probe.py <<'IDENTITY_PY'
+          import json
+          import os
+          from pathlib import Path
+          import pwd
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          
+          phase = sys.argv[1]
+          safe_names = {'', 'runner', 'runneradmin', 'root', 'buildkite', 'Buildkite', 'Ubuntu',
+                        'Identity Probe', 'Probe Author', 'Probe Committer'}
+          safe_emails = {'identity-probe@example.invalid', 'author@example.invalid',
+                         'committer@example.invalid', 'fallback@example.invalid'}
+          redactions = {}
+          
+          
+          def identity(value, email=False):
+              if value not in (safe_emails if email else safe_names):
+                  if value:
+                      redactions[value] = '[redacted non-synthetic identity]'
+                  return '[redacted non-synthetic identity]'
+              return value
+          
+          
+          def clean(value):
+              for original in sorted(redactions, key=len, reverse=True):
+                  value = value.replace(original, redactions[original])
+              return value
+          
+          
+          def capture(args, cwd=None):
+              result = subprocess.run(args, cwd=cwd, text=True, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+              return {'command': args, 'exit': result.returncode,
+                      'stdout': clean(result.stdout), 'stderr': clean(result.stderr)}
+          
+          
+          def config(cwd):
+              args = ['git', 'config', '--show-origin', '--show-scope', '--get-regexp',
+                      r'^(user|author|committer)\.']
+              result = subprocess.run(args, cwd=cwd, text=True, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+              entries = []
+              for line in result.stdout.splitlines():
+                  parts = line.split(None, 3)
+                  if len(parts) < 3:
+                      continue
+                  scope, origin, key = parts[:3]
+                  value = parts[3] if len(parts) == 4 else ''
+                  if key.lower().endswith('.email'):
+                      value = identity(value, email=True)
+                  elif key.lower().endswith('.name'):
+                      value = identity(value)
+                  elif key.lower() != 'user.useconfigonly':
+                      value = '[value withheld: not name/email/useConfigOnly]'
+                  entries.append({'scope': scope, 'origin': clean(origin), 'key': key, 'value': value})
+              return {'command': args, 'exit': result.returncode, 'entries': entries,
+                      'stderr': clean(result.stderr)}
+          
+          
+          pw = pwd.getpwuid(os.getuid())
+          username = identity(pw.pw_name)
+          gecos = identity(pw.pw_gecos)
+          identity(pw.pw_gecos.split(',', 1)[0])
+          env = {}
+          for key in ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE',
+                      'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE', 'EMAIL',
+                      'HOME', 'XDG_CONFIG_HOME', 'GIT_CONFIG', 'GIT_CONFIG_GLOBAL',
+                      'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_COUNT',
+                      'GIT_CONFIG_PARAMETERS']:
+              value = os.environ.get(key)
+              if value is not None:
+                  if key.endswith('_NAME'):
+                      value = identity(value)
+                  elif key.endswith('_EMAIL') or key == 'EMAIL':
+                      value = identity(value, email=True)
+                  elif key == 'GIT_CONFIG_PARAMETERS':
+                      value = '[present; opaque config string withheld]'
+                  else:
+                      value = clean(value)
+              env[key] = {'present': key in os.environ, 'value': value}
+          for key in sorted(os.environ):
+              if re.fullmatch(r'GIT_CONFIG_(KEY|VALUE)_\d+', key):
+                  env[key] = {'present': True, 'value': '[withheld; effective identity config queried separately]'}
+          
+          hostname = capture(['hostname'])
+          fqdn = capture(['hostname', '-f'])
+          for host in (hostname['stdout'].strip(), fqdn['stdout'].strip()):
+              if host and pw.pw_name in safe_names:
+                  safe_emails.add(pw.pw_name + '@' + host)
+                  safe_emails.add(pw.pw_name + '@' + host + '.(none)')
+          
+          report = {'phase': phase, 'git_version': capture(['git', '--version']),
+                    'uid': os.getuid(), 'username': username, 'gecos': gecos,
+                    'hostname': hostname, 'fqdn': fqdn, 'env': env,
+                    'mailname': {'exists': Path('/etc/mailname').exists()},
+                    'workspace_git_present': Path('.git').exists(),
+                    'workspace_config': config(None)}
+          if report['workspace_git_present']:
+              report['checkout_sha'] = capture(['git', 'rev-parse', 'HEAD'])
+          if report['mailname']['exists']:
+              value = Path('/etc/mailname').read_text().strip()
+              report['mailname']['value'] = value if value in {hostname['stdout'].strip(), fqdn['stdout'].strip()} else '[non-runner mailname withheld]'
+          
+          with tempfile.TemporaryDirectory(prefix='git-identity-probe-') as directory:
+              report['init'] = capture(['git', 'init', '--quiet', directory])
+              report['fresh_config'] = config(directory)
+              report['author'] = capture(['git', 'var', 'GIT_AUTHOR_IDENT'], directory)
+              report['committer'] = capture(['git', 'var', 'GIT_COMMITTER_IDENT'], directory)
+              report['default_commit'] = capture(['git', 'commit', '--allow-empty', '-m', 'default identity probe'], directory)
+              if report['default_commit']['exit'] == 0:
+                  report['default_committed_identity'] = capture(['git', 'show', '-s', '--format=author=%an <%ae>%ncommitter=%cn <%ce>', 'HEAD'], directory)
+              report['email_only_author'] = capture(['git', '-c', 'user.email=identity-probe@example.invalid', 'var', 'GIT_AUTHOR_IDENT'], directory)
+              report['name_only_author'] = capture(['git', '-c', 'user.name=Identity Probe', 'var', 'GIT_AUTHOR_IDENT'], directory)
+              report['explicit_commit'] = capture(['git', '-c', 'user.name=Identity Probe', '-c', 'user.email=identity-probe@example.invalid',
+                                                   'commit', '--allow-empty', '-m', 'explicit identity probe'], directory)
+              if report['explicit_commit']['exit'] == 0:
+                  report['explicit_committed_identity'] = capture(['git', 'show', '-s', '--format=author=%an <%ae>%ncommitter=%cn <%ce>', 'HEAD'], directory)
+          
+          print('IDENTITY_PROBE_JSON ' + json.dumps(report, sort_keys=True))
+          assert report['init']['exit'] == 0
+          assert report['explicit_commit']['exit'] == 0, 'Explicit synthetic identity control failed'
+          if phase.startswith('supplied-'):
+              assert report['default_commit']['exit'] == 0, 'Workflow-supplied identity failed'
+              expected = 'author=Probe Author <author@example.invalid>\ncommitter=Probe Committer <committer@example.invalid>\n'
+              assert report['default_committed_identity']['stdout'] == expected
+              assert report['explicit_committed_identity']['stdout'] == expected
+          else:
+              expected = 'author=Identity Probe <identity-probe@example.invalid>\ncommitter=Identity Probe <identity-probe@example.invalid>\n'
+              assert report['explicit_committed_identity']['stdout'] == expected
+          IDENTITY_PY
+          python3 /tmp/paired-git-identity-probe.py baseline-before-checkout
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Identity after checkout
+        shell: bash
+        run: python3 /tmp/paired-git-identity-probe.py baseline-after-checkout
+  supplied:
+    runs-on: ubuntu-latest
+    env:
+      GIT_AUTHOR_NAME: Probe Author
+      GIT_AUTHOR_EMAIL: author@example.invalid
+      GIT_COMMITTER_NAME: Probe Committer
+      GIT_COMMITTER_EMAIL: committer@example.invalid
+      EMAIL: fallback@example.invalid
+    steps:
+      - name: Identity before checkout
+        shell: bash
+        run: |
+          cat > /tmp/paired-git-identity-probe.py <<'IDENTITY_PY'
+          import json
+          import os
+          from pathlib import Path
+          import pwd
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          
+          phase = sys.argv[1]
+          safe_names = {'', 'runner', 'runneradmin', 'root', 'buildkite', 'Buildkite', 'Ubuntu',
+                        'Identity Probe', 'Probe Author', 'Probe Committer'}
+          safe_emails = {'identity-probe@example.invalid', 'author@example.invalid',
+                         'committer@example.invalid', 'fallback@example.invalid'}
+          redactions = {}
+          
+          
+          def identity(value, email=False):
+              if value not in (safe_emails if email else safe_names):
+                  if value:
+                      redactions[value] = '[redacted non-synthetic identity]'
+                  return '[redacted non-synthetic identity]'
+              return value
+          
+          
+          def clean(value):
+              for original in sorted(redactions, key=len, reverse=True):
+                  value = value.replace(original, redactions[original])
+              return value
+          
+          
+          def capture(args, cwd=None):
+              result = subprocess.run(args, cwd=cwd, text=True, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+              return {'command': args, 'exit': result.returncode,
+                      'stdout': clean(result.stdout), 'stderr': clean(result.stderr)}
+          
+          
+          def config(cwd):
+              args = ['git', 'config', '--show-origin', '--show-scope', '--get-regexp',
+                      r'^(user|author|committer)\.']
+              result = subprocess.run(args, cwd=cwd, text=True, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+              entries = []
+              for line in result.stdout.splitlines():
+                  parts = line.split(None, 3)
+                  if len(parts) < 3:
+                      continue
+                  scope, origin, key = parts[:3]
+                  value = parts[3] if len(parts) == 4 else ''
+                  if key.lower().endswith('.email'):
+                      value = identity(value, email=True)
+                  elif key.lower().endswith('.name'):
+                      value = identity(value)
+                  elif key.lower() != 'user.useconfigonly':
+                      value = '[value withheld: not name/email/useConfigOnly]'
+                  entries.append({'scope': scope, 'origin': clean(origin), 'key': key, 'value': value})
+              return {'command': args, 'exit': result.returncode, 'entries': entries,
+                      'stderr': clean(result.stderr)}
+          
+          
+          pw = pwd.getpwuid(os.getuid())
+          username = identity(pw.pw_name)
+          gecos = identity(pw.pw_gecos)
+          identity(pw.pw_gecos.split(',', 1)[0])
+          env = {}
+          for key in ['GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE',
+                      'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE', 'EMAIL',
+                      'HOME', 'XDG_CONFIG_HOME', 'GIT_CONFIG', 'GIT_CONFIG_GLOBAL',
+                      'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_COUNT',
+                      'GIT_CONFIG_PARAMETERS']:
+              value = os.environ.get(key)
+              if value is not None:
+                  if key.endswith('_NAME'):
+                      value = identity(value)
+                  elif key.endswith('_EMAIL') or key == 'EMAIL':
+                      value = identity(value, email=True)
+                  elif key == 'GIT_CONFIG_PARAMETERS':
+                      value = '[present; opaque config string withheld]'
+                  else:
+                      value = clean(value)
+              env[key] = {'present': key in os.environ, 'value': value}
+          for key in sorted(os.environ):
+              if re.fullmatch(r'GIT_CONFIG_(KEY|VALUE)_\d+', key):
+                  env[key] = {'present': True, 'value': '[withheld; effective identity config queried separately]'}
+          
+          hostname = capture(['hostname'])
+          fqdn = capture(['hostname', '-f'])
+          for host in (hostname['stdout'].strip(), fqdn['stdout'].strip()):
+              if host and pw.pw_name in safe_names:
+                  safe_emails.add(pw.pw_name + '@' + host)
+                  safe_emails.add(pw.pw_name + '@' + host + '.(none)')
+          
+          report = {'phase': phase, 'git_version': capture(['git', '--version']),
+                    'uid': os.getuid(), 'username': username, 'gecos': gecos,
+                    'hostname': hostname, 'fqdn': fqdn, 'env': env,
+                    'mailname': {'exists': Path('/etc/mailname').exists()},
+                    'workspace_git_present': Path('.git').exists(),
+                    'workspace_config': config(None)}
+          if report['workspace_git_present']:
+              report['checkout_sha'] = capture(['git', 'rev-parse', 'HEAD'])
+          if report['mailname']['exists']:
+              value = Path('/etc/mailname').read_text().strip()
+              report['mailname']['value'] = value if value in {hostname['stdout'].strip(), fqdn['stdout'].strip()} else '[non-runner mailname withheld]'
+          
+          with tempfile.TemporaryDirectory(prefix='git-identity-probe-') as directory:
+              report['init'] = capture(['git', 'init', '--quiet', directory])
+              report['fresh_config'] = config(directory)
+              report['author'] = capture(['git', 'var', 'GIT_AUTHOR_IDENT'], directory)
+              report['committer'] = capture(['git', 'var', 'GIT_COMMITTER_IDENT'], directory)
+              report['default_commit'] = capture(['git', 'commit', '--allow-empty', '-m', 'default identity probe'], directory)
+              if report['default_commit']['exit'] == 0:
+                  report['default_committed_identity'] = capture(['git', 'show', '-s', '--format=author=%an <%ae>%ncommitter=%cn <%ce>', 'HEAD'], directory)
+              report['email_only_author'] = capture(['git', '-c', 'user.email=identity-probe@example.invalid', 'var', 'GIT_AUTHOR_IDENT'], directory)
+              report['name_only_author'] = capture(['git', '-c', 'user.name=Identity Probe', 'var', 'GIT_AUTHOR_IDENT'], directory)
+              report['explicit_commit'] = capture(['git', '-c', 'user.name=Identity Probe', '-c', 'user.email=identity-probe@example.invalid',
+                                                   'commit', '--allow-empty', '-m', 'explicit identity probe'], directory)
+              if report['explicit_commit']['exit'] == 0:
+                  report['explicit_committed_identity'] = capture(['git', 'show', '-s', '--format=author=%an <%ae>%ncommitter=%cn <%ce>', 'HEAD'], directory)
+          
+          print('IDENTITY_PROBE_JSON ' + json.dumps(report, sort_keys=True))
+          assert report['init']['exit'] == 0
+          assert report['explicit_commit']['exit'] == 0, 'Explicit synthetic identity control failed'
+          if phase.startswith('supplied-'):
+              assert report['default_commit']['exit'] == 0, 'Workflow-supplied identity failed'
+              expected = 'author=Probe Author <author@example.invalid>\ncommitter=Probe Committer <committer@example.invalid>\n'
+              assert report['default_committed_identity']['stdout'] == expected
+              assert report['explicit_committed_identity']['stdout'] == expected
+          else:
+              expected = 'author=Identity Probe <identity-probe@example.invalid>\ncommitter=Identity Probe <identity-probe@example.invalid>\n'
+              assert report['explicit_committed_identity']['stdout'] == expected
+          IDENTITY_PY
+          python3 /tmp/paired-git-identity-probe.py supplied-before-checkout
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Identity after checkout
+        shell: bash
+        run: python3 /tmp/paired-git-identity-probe.py supplied-after-checkout
